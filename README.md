@@ -1,2 +1,0 @@
-# frowpedia.org
-Frowpedia
