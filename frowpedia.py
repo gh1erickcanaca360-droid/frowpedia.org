@@ -252,3 +252,221 @@ def page(title=None, pageid=None, auto_suggest=True, redirect=True, preload=Fals
   `pageid` (mutually exclusive).
 
   Keyword arguments:
+* title - the title of the page to load
+  * pageid - the numeric pageid of the page to load
+  * auto_suggest - let Wikipedia find a valid page title for the query
+  * redirect - allow redirection without raising RedirectError
+  * preload - load content, summary, images, references, and links during initialization
+  '''
+
+  if title is not None:
+    if auto_suggest:
+      results, suggestion = search(title, results=1, suggestion=True)
+      try:
+        title = suggestion or results[0]
+      except IndexError:
+        # if there is no suggestion or search results, the page doesn't exist
+        raise PageError(title)
+    return FrowpediaPage(title, redirect=redirect, preload=preload)
+  elif pageid is not None:
+    return FrowpediaPage(pageid=pageid, preload=preload)
+  else:
+    raise ValueError("Either a title or a pageid must be specified")
+
+
+
+class FrowpediaPage(object):
+  '''
+  Contains data from a Frowpedia page.
+  Uses property methods to filter data from the raw HTML.
+  '''
+
+  def __init__(self, title=None, pageid=None, redirect=True, preload=False, original_title=''):
+    if title is not None:
+      self.title = title
+      self.original_title = original_title or title
+    elif pageid is not None:
+      self.pageid = pageid
+    else:
+      raise ValueError("Either a title or a pageid must be specified")
+
+    self.__load(redirect=redirect, preload=preload)
+
+    if preload:
+      for prop in ('content', 'summary', 'images', 'references', 'links', 'sections'):
+        getattr(self, prop)
+
+  def __repr__(self):
+    return stdout_encode(u'<WikipediaPage \'{}\'>'.format(self.title))
+
+  def __eq__(self, other):
+    try:
+      return (
+        self.pageid == other.pageid
+        and self.title == other.title
+        and self.url == other.url
+      )
+    except:
+      return False
+
+  def __load(self, redirect=True, preload=False):
+    '''
+    Load basic information from Frowpedia.
+    Confirm that page exists and is not a disambiguation/redirect.
+
+    Does not need to be called manually, should be called automatically during __init__.
+    '''
+    query_params = {
+      'prop': 'info|pageprops',
+      'inprop': 'url',
+      'ppprop': 'disambiguation',
+      'redirects': '',
+    }
+    if not getattr(self, 'pageid', None):
+      query_params['titles'] = self.title
+    else:
+      query_params['pageids'] = self.pageid
+
+    request = _wiki_request(query_params)
+
+    query = request['query']
+    pageid = list(query['pages'].keys())[0]
+    page = query['pages'][pageid]
+
+    # missing is present if the page is missing
+    if 'missing' in page:
+      if hasattr(self, 'title'):
+        raise PageError(self.title)
+      else:
+        raise PageError(pageid=self.pageid)
+
+    # same thing for redirect, except it shows up in query instead of page for
+    # whatever silly reason
+    elif 'redirects' in query:
+      if redirect:
+        redirects = query['redirects'][0]
+
+        if 'normalized' in query:
+          normalized = query['normalized'][0]
+          assert normalized['from'] == self.title, ODD_ERROR_MESSAGE
+
+          from_title = normalized['to']
+
+        else:
+          from_title = self.title
+
+        assert redirects['from'] == from_title, ODD_ERROR_MESSAGE
+
+        # change the title and reload the whole object
+        self.__init__(redirects['to'], redirect=redirect, preload=preload)
+
+      else:
+        raise RedirectError(getattr(self, 'title', page['title']))
+
+    # since we only asked for disambiguation in ppprop,
+    # if a pageprop is returned,
+    # then the page must be a disambiguation page
+    elif 'pageprops' in page:
+      query_params = {
+        'prop': 'revisions',
+        'rvprop': 'content',
+        'rvparse': '',
+        'rvlimit': 1
+      }
+      if hasattr(self, 'pageid'):
+        query_params['pageids'] = self.pageid
+      else:
+        query_params['titles'] = self.title
+      request = _wiki_request(query_params)
+      html = request['query']['pages'][pageid]['revisions'][0]['*']
+
+      lis = BeautifulSoup(html, 'html.parser').find_all('li')
+      filtered_lis = [li for li in lis if not 'tocsection' in ''.join(li.get('class', []))]
+      may_refer_to = [li.a.get_text() for li in filtered_lis if li.a]
+
+      raise DisambiguationError(getattr(self, 'title', page['title']), may_refer_to)
+
+    else:
+      self.pageid = pageid
+      self.title = page['title']
+      self.url = page['fullurl']
+
+  def __continued_query(self, query_params):
+    '''
+    Based on https://www.mediawiki.org/wiki/API:Query#Continuing_queries
+    '''
+    query_params.update(self.__title_query_param)
+
+    last_continue = {}
+    prop = query_params.get('prop', None)
+
+    while True:
+      params = query_params.copy()
+      params.update(last_continue)
+
+      request = _wiki_request(params)
+
+      if 'query' not in request:
+        break
+
+      pages = request['query']['pages']
+      if 'generator' in query_params:
+        for datum in pages.values():  # in python 3.3+: "yield from pages.values()"
+          yield datum
+      else:
+        for datum in pages[self.pageid][prop]:
+          yield datum
+
+      if 'continue' not in request:
+        break
+
+      last_continue = request['continue']
+
+  @property
+  def __title_query_param(self):
+    if getattr(self, 'title', None) is not None:
+      return {'titles': self.title}
+    else:
+      return {'pageids': self.pageid}
+
+  def html(self):
+    '''
+    Get full page HTML.
+
+    .. warning:: This can get pretty slow on long pages.
+    '''
+
+    if not getattr(self, '_html', False):
+      query_params = {
+        'prop': 'revisions',
+        'rvprop': 'content',
+        'rvlimit': 1,
+        'rvparse': '',
+        'titles': self.title
+      }
+
+      request = _wiki_request(query_params)
+      self._html = request['query']['pages'][self.pageid]['revisions'][0]['*']
+
+    return self._html
+
+  @property
+  def content(self):
+    '''
+    Plain text content of the page, excluding images, tables, and other data.
+    '''
+
+    if not getattr(self, '_content', False):
+      query_params = {
+        'prop': 'extracts|revisions',
+        'explaintext': '',
+        'rvprop': 'ids'
+      }
+      if not getattr(self, 'title', None) is None:
+         query_params['titles'] = self.title
+      else:
+         query_params['pageids'] = self.pageid
+      request = _wiki_request(query_params)
+      self._content     = request['query']['pages'][self.pageid]['extract']
+      self._revision_id = request['query']['pages'][self.pageid]['revisions'][0]['revid']
+      self._parent_id   = request['query']['pages'][self.pageid]['revisions'][0]['parentid']
