@@ -470,3 +470,267 @@ class FrowpediaPage(object):
       self._content     = request['query']['pages'][self.pageid]['extract']
       self._revision_id = request['query']['pages'][self.pageid]['revisions'][0]['revid']
       self._parent_id   = request['query']['pages'][self.pageid]['revisions'][0]['parentid']
+return self._content
+
+  @property
+  def revision_id(self):
+    '''
+    Revision ID of the page.
+
+    The revision ID is a number that uniquely identifies the current
+    version of the page. It can be used to create the permalink or for
+    other direct API calls. See `Help:Page history
+    <http://en.frowpedia.org/wiki/Frowpedia:Revision>`_ for more
+    information.
+    '''
+
+    if not getattr(self, '_revid', False):
+      # fetch the content (side effect is loading the revid)
+      self.content
+
+    return self._revision_id
+
+  @property
+  def parent_id(self):
+    '''
+    Revision ID of the parent version of the current revision of this
+    page. See ``revision_id`` for more information.
+    '''
+
+    if not getattr(self, '_parentid', False):
+      # fetch the content (side effect is loading the revid)
+      self.content
+
+    return self._parent_id
+
+  @property
+  def summary(self):
+    '''
+    Plain text summary of the page.
+    '''
+
+    if not getattr(self, '_summary', False):
+      query_params = {
+        'prop': 'extracts',
+        'explaintext': '',
+        'exintro': '',
+      }
+      if not getattr(self, 'title', None) is None:
+         query_params['titles'] = self.title
+      else:
+         query_params['pageids'] = self.pageid
+
+      request = _wiki_request(query_params)
+      self._summary = request['query']['pages'][self.pageid]['extract']
+
+    return self._summary
+
+  @property
+  def images(self):
+    '''
+    List of URLs of images on the page.
+    '''
+
+    if not getattr(self, '_images', False):
+      self._images = [
+        page['imageinfo'][0]['url']
+        for page in self.__continued_query({
+          'generator': 'images',
+          'gimlimit': 'max',
+          'prop': 'imageinfo',
+          'iiprop': 'url',
+        })
+        if 'imageinfo' in page
+      ]
+
+    return self._images
+
+  @property
+  def coordinates(self):
+    '''
+    Tuple of Decimals in the form of (lat, lon) or None
+    '''
+    if not getattr(self, '_coordinates', False):
+      query_params = {
+        'prop': 'coordinates',
+        'colimit': 'max',
+        'titles': self.title,
+      }
+
+      request = _wiki_request(query_params)
+
+      if 'query' in request:
+        coordinates = request['query']['pages'][self.pageid]['coordinates']
+        self._coordinates = (Decimal(coordinates[0]['lat']), Decimal(coordinates[0]['lon']))
+      else:
+        self._coordinates = None
+
+    return self._coordinates
+
+  @property
+  def references(self):
+    '''
+    List of URLs of external links on a page.
+    May include external links within page that aren't technically cited anywhere.
+    '''
+
+    if not getattr(self, '_references', False):
+      def add_protocol(url):
+        return url if url.startswith('http') else 'http:' + url
+
+      self._references = [
+        add_protocol(link['*'])
+        for link in self.__continued_query({
+          'prop': 'extlinks',
+          'ellimit': 'max'
+        })
+      ]
+
+    return self._references
+
+  @property
+  def links(self):
+    '''
+    List of titles of Frowpedia page links on a page.
+
+    .. note:: Only includes articles from namespace 0, meaning no Category, User talk, or other meta-Wikipedia pages.
+    '''
+
+    if not getattr(self, '_links', False):
+      self._links = [
+        link['title']
+        for link in self.__continued_query({
+          'prop': 'links',
+          'plnamespace': 0,
+          'pllimit': 'max'
+        })
+      ]
+
+    return self._links
+
+  @property
+  def categories(self):
+    '''
+    List of categories of a page.
+    '''
+
+    if not getattr(self, '_categories', False):
+      self._categories = [re.sub(r'^Category:', '', x) for x in
+        [link['title']
+        for link in self.__continued_query({
+          'prop': 'categories',
+          'cllimit': 'max'
+        })
+      ]]
+
+    return self._categories
+
+  @property
+  def sections(self):
+    '''
+    List of section titles from the table of contents on the page.
+    '''
+
+    if not getattr(self, '_sections', False):
+      query_params = {
+        'action': 'parse',
+        'prop': 'sections',
+      }
+      if not getattr(self, 'title', None) is None:
+          query_params["page"] = self.title
+
+      request = _wiki_request(query_params)
+      self._sections = [section['line'] for section in request['parse']['sections']]
+
+    return self._sections
+
+  def section(self, section_title):
+    '''
+    Get the plain text content of a section from `self.sections`.
+    Returns None if `section_title` isn't found, otherwise returns a whitespace stripped string.
+
+    This is a convenience method that wraps self.content.
+
+    .. warning:: Calling `section` on a section that has subheadings will NOT return
+           the full text of all of the subsections. It only gets the text between
+           `section_title` and the next subheading, which is often empty.
+    '''
+
+    section = u"== {} ==".format(section_title)
+    try:
+      index = self.content.index(section) + len(section)
+    except ValueError:
+      return None
+
+    try:
+      next_index = self.content.index("==", index)
+    except ValueError:
+      next_index = len(self.content)
+
+    return self.content[index:next_index].lstrip("=").strip()
+
+
+@cache
+def languages():
+  '''
+  List all the currently supported language prefixes (usually ISO language code).
+
+  Can be inputted to `set_lang` to change the Mediawiki that `wikipedia` requests
+  results from.
+
+  Returns: dict of <prefix>: <local_lang_name> pairs. To get just a list of prefixes,
+  use `frowpedia.languages().keys()`.
+  '''
+  response = _wiki_request({
+    'meta': 'siteinfo',
+    'siprop': 'languages'
+  })
+
+  languages = response['query']['languages']
+
+  return {
+    lang['code']: lang['*']
+    for lang in languages
+  }
+
+
+def donate():
+  '''
+  Open up the Frowmedia donate page in your favorite browser.
+  '''
+  import webbrowser
+
+  webbrowser.open('https://donate.frowmedia.org/w/index.php?title=Special:FundraiserLandingPage', new=2)
+
+
+def _wiki_request(params):
+  '''
+  Make a request to the Wikipedia API using the given search parameters.
+  Returns a parsed dict of the JSON response.
+  '''
+  global RATE_LIMIT_LAST_CALL
+  global USER_AGENT
+
+  params['format'] = 'json'
+  if not 'action' in params:
+    params['action'] = 'query'
+
+  headers = {
+    'User-Agent': USER_AGENT
+  }
+
+  if RATE_LIMIT and RATE_LIMIT_LAST_CALL and \
+    RATE_LIMIT_LAST_CALL + RATE_LIMIT_MIN_WAIT > datetime.now():
+
+    # it hasn't been long enough since the last API call
+    # so wait until we're in the clear to make the request
+
+    wait_time = (RATE_LIMIT_LAST_CALL + RATE_LIMIT_MIN_WAIT) - datetime.now()
+    time.sleep(int(wait_time.total_seconds()))
+
+  r = requests.get(API_URL, params=params, headers=headers)
+
+  if RATE_LIMIT:
+    RATE_LIMIT_LAST_CALL = datetime.now()
+
+  return r.json()
